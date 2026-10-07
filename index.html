@@ -1538,6 +1538,42 @@ window.addEventListener('appinstalled', function(){ window.__deferredInstall = n
       }
     };
   }
+  async function linkGoogleAccount(){
+    const fb = window.firebase, auth = cloud.fbAuth;
+    if (!fb || !auth || !auth.currentUser) return;
+    const provider = new fb.auth.GoogleAuthProvider();
+    try{
+      if (auth.currentUser.isAnonymous){
+        await auth.currentUser.linkWithPopup(provider);
+        toast('تم ربط بياناتك بحساب Google ✅');
+      } else {
+        await auth.signInWithPopup(provider);
+      }
+      setTimeout(function(){ location.reload(); }, 700);
+    }catch(e){
+      const code = e && e.code;
+      if (code === 'auth/credential-already-in-use' || code === 'auth/email-already-in-use'){
+        // this Google account already holds a space (e.g. linked on another computer): open it
+        const cred = e.credential || (fb.auth.GoogleAuthProvider.credentialFromError ? fb.auth.GoogleAuthProvider.credentialFromError(e) : null);
+        if (cred){
+          try{ await auth.signInWithCredential(cred); toast('تم فتح بياناتك المحفوظة في حساب Google ✅'); setTimeout(function(){ location.reload(); }, 700); return; }
+          catch(e2){ console.warn(e2); }
+        }
+      }
+      if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') return;
+      if (code === 'auth/popup-blocked') { toast('المتصفح منع نافذة الدخول — اسمحي بالنوافذ المنبثقة لهذا الموقع'); return; }
+      if (code === 'auth/unauthorized-domain') { toast('هذا الموقع غير مسموح به في إعدادات Firebase بعد'); return; }
+      if (code === 'auth/operation-not-allowed') { toast('تسجيل الدخول بـ Google غير مفعّل في Firebase بعد'); return; }
+      console.warn('google link failed', e);
+      toast('تعذّر الربط بحساب Google');
+    }
+  }
+  async function signOutGoogle(){
+    if (!confirm('تسجيل الخروج من هذا الجهاز؟ تبقى بياناتك محفوظة في حساب Google، ويبدأ هذا المتصفح بمساحة جديدة فارغة حتى تسجّلي الدخول مرة أخرى.')) return;
+    try{ await cloud.fbAuth.signOut(); }catch(e){}
+    location.reload();
+  }
+
   async function initFirebaseCloud(){
     if (!FIREBASE_CONFIG || !/^https?:$/.test(location.protocol)) return false;
     try{
@@ -1556,6 +1592,7 @@ window.addEventListener('appinstalled', function(){ window.__deferredInstall = n
       cloud.db = makeFbDb(fs, user.uid);
       cloud.assets = makeFbAssets(fs, user.uid);
       cloud.kind = 'firebase';
+      cloud.fbAuth = auth;
       return true;
     }catch(e){ console.warn('firebase init failed', e); return false; }
   }
@@ -1847,8 +1884,13 @@ window.addEventListener('appinstalled', function(){ window.__deferredInstall = n
     };
     try{
       if (cloud.ready){
+        const fbUser = (cloud.kind === 'firebase' && cloud.fbAuth) ? cloud.fbAuth.currentUser : null;
+        const googleLinked = !!(fbUser && fbUser.isAnonymous === false);
         let html = cloud.kind === 'firebase'
-          ? '<div style="text-align:right;">☁️ <b>قاعدة بيانات Firebase مفعّلة</b> — بياناتك وصورك محفوظة في حسابك الخاص على هذا المتصفح، ولا يراها غيرك.<br><span style="color:var(--muted);">تنبيه: إن مسحتِ بيانات هذا المتصفح يتعذّر الوصول إليها لاحقًا، فاحفظي نسخة احتياطية JSON من حين لآخر.</span></div>'
+          ? (googleLinked
+              ? '<div style="text-align:right;">☁️ <b>قاعدة بيانات Firebase مفعّلة</b> — بياناتك وصورك محفوظة في حساب Google: <b>' + escapeHtml(fbUser.email || '') + '</b>، وتفتحينها من أي جهاز بعد تسجيل الدخول بنفس الحساب.</div><button class="btn btn-outline btn-block btn-sm" id="googleOutBtn" style="margin-top:6px;">تسجيل الخروج من هذا الجهاز</button>'
+              : '<div style="text-align:right;">☁️ <b>قاعدة بيانات Firebase مفعّلة</b> — بياناتك وصورك محفوظة في حسابك الخاص على هذا المتصفح، ولا يراها غيرك.<br><span style="color:var(--muted);">تنبيه: إن مسحتِ بيانات هذا المتصفح يتعذّر الوصول إليها لاحقًا، فاحفظي نسخة احتياطية JSON من حين لآخر.</span></div>'
+                + (fbUser ? '<div style="margin-top:8px;padding:8px 10px;border:1px dashed var(--line);border-radius:10px;text-align:right;">🔗 بياناتك الآن على هذا المتصفح فقط. اربطيها بحساب Google لتفتحيها من أي كمبيوتر آخر بنفس الحساب.<button class="btn btn-teal btn-block" id="googleLinkBtn" style="margin-top:6px;">ربط بحساب Google</button></div>' : ''))
           : '<div style="text-align:right;">☁️ <b>قاعدة البيانات المدمجة مفعّلة</b> — الصور تُحفظ في تخزين مستقل بمساحة أكبر، ويراها كل من لديه صلاحية.</div>';
         if (cloud.assets){
           try{
@@ -1862,6 +1904,8 @@ window.addEventListener('appinstalled', function(){ window.__deferredInstall = n
         const n = cloud.localOnly.size;
         if (n && cloud.canWrite) html += '<button class="btn btn-teal btn-block" id="migrateBtn" style="margin-top:8px;">📤 نقل بياناتي الموجودة على هذا الجهاز إلى قاعدة البيانات (' + toArabicDigits(n) + ' عنصر)</button><div id="migrateProg" style="margin-top:6px;"></div>';
         body.innerHTML = html;
+        const gl = body.querySelector('#googleLinkBtn'); if (gl) gl.addEventListener('click', linkGoogleAccount);
+        const go = body.querySelector('#googleOutBtn'); if (go) go.addEventListener('click', signOutGoogle);
         const mb = body.querySelector('#migrateBtn');
         if (mb) mb.addEventListener('click', function(){ migrateLocalToCloud(card); });
       } else {
