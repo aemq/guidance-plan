@@ -254,6 +254,20 @@ window.addEventListener('appinstalled', function(){ window.__deferredInstall = n
   .report-imgs{display:flex; flex-wrap:wrap; gap:6px; margin-top:8px;}
   .report-imgs img{width:90px; height:90px; object-fit:cover; border-radius:8px; border:1px solid var(--line);}
   .report-pdf{margin-top:8px;}
+  .img-cell img, .report-imgs img, .report-pdf img{ cursor:zoom-in; }
+  #imgViewer{ width:100vw; height:100vh; height:100dvh; max-width:none; max-height:none; margin:0; padding:0; border:0;
+    background:#0b0f0f; color:#fff; display:none; flex-direction:column; z-index:100; }
+  #imgViewer[open], #imgViewer.iv-open{ display:flex; position:fixed; inset:0; }
+  #imgViewer::backdrop{ background:rgba(0,0,0,.6); }
+  #imgViewer .iv-top, #imgViewer .iv-nav{ display:flex; align-items:center; justify-content:space-between; gap:8px; padding:10px 12px; }
+  #imgViewer .iv-top{ padding-top:max(10px, env(safe-area-inset-top, 0px)); }
+  #imgViewer .iv-nav{ padding-bottom:max(12px, env(safe-area-inset-bottom, 0px)); }
+  #imgViewer .iv-btn{ background:rgba(255,255,255,.14); color:#fff; border:1px solid rgba(255,255,255,.3); border-radius:10px; padding:9px 14px; font-size:14px; font-family:inherit; }
+  #imgViewer .iv-count{ font-size:13px; opacity:.85; }
+  #imgViewer .iv-stage{ flex:1; min-height:0; position:relative; display:flex; align-items:center; justify-content:center; overflow:auto; padding:0 8px; }
+  #imgViewer .iv-img{ max-width:100%; max-height:100%; object-fit:contain; border-radius:6px; background:#fff; }
+  #imgViewer .iv-msg{ position:absolute; font-size:14px; opacity:.85; }
+  @media print{ #imgViewer{ display:none !important; } }
   .report-pdf .cap{font-size:11px; color:var(--muted); margin-bottom:4px;}
   .report-pdf img{display:block; width:100%; max-width:520px; margin:6px auto; border:1px solid var(--line); border-radius:6px; page-break-inside:avoid;}
 
@@ -2358,9 +2372,13 @@ window.addEventListener('appinstalled', function(){ window.__deferredInstall = n
                  <span style="font-size:22px;">📕</span>${escapeHtml(ef.name||'PDF')}
                  <span style="color:var(--muted);margin-top:2px;">${ef.pdfFailed?'تعذّر التحويل':'جارٍ التحويل…'}</span>
                </div><button class="rm">✕</button>`;
-          cell.addEventListener('click', function(e){ if (e.target.closest('.rm')) return; openPdfFile(ef); });
+          cell.addEventListener('click', function(e){ if (e.target.closest('.rm')) return; if (ef.pages && ef.pages.length) openViewer(ef.pages, 0, { pdf: ef }); else openPdfFile(ef); });
         } else {
           cell.innerHTML = `<img src="${ef.data}"><button class="rm">✕</button>`;
+          cell.querySelector('img').addEventListener('click', ()=>{
+            const pics = (item.evidenceFiles||[]).filter(f=>f.type !== 'pdf');
+            openViewer(pics.map(f=>f.data), pics.indexOf(ef));
+          });
         }
         cell.querySelector('.rm').addEventListener('click', ()=>{
           releaseEvidenceFile(item.evidenceFiles[idx]); item.evidenceFiles.splice(idx,1); saveItem(item.id, item); renderEvFilesGrid();
@@ -2489,6 +2507,7 @@ window.addEventListener('appinstalled', function(){ window.__deferredInstall = n
       (item.images||[]).forEach((src, idx)=>{
         const cell = document.createElement('div'); cell.className='img-cell';
         cell.innerHTML = `<img src="${src}"><button class="rm">✕</button>`;
+        cell.querySelector('img').addEventListener('click', ()=> openViewer(item.images, idx));
         cell.querySelector('.rm').addEventListener('click', async ()=>{
           releaseAsset(item.images[idx]); item.images.splice(idx,1); saveItem(item.id, item); renderImgGrid();
         });
@@ -3053,18 +3072,111 @@ window.addEventListener('appinstalled', function(){ window.__deferredInstall = n
     toast('جارٍ تحويل صفحات PDF إلى صور للتقرير…');
     for (const pair of todo) await convertPdfPreviews(pair[0], pair[1]);
   }
+  // ---------------- picture viewer ----------------
+  // Tapping a picture opens it full screen. Works on phones: swipe to move
+  // between pictures, pinch to zoom, ✕ / tap outside / back-key to close.
+  function resolveImgSrc(ref){
+    if (typeof ref === 'string' && ref.indexOf('fsfile:') === 0 && cloud.assets && cloud.assets.readDataUrl) return fsDataUrl(ref.slice(7));
+    return Promise.resolve(ref);
+  }
+  let viewerState = null;
+  function openViewer(refs, start, opts){
+    refs = (refs || []).filter(Boolean);
+    if (!refs.length) return;
+    opts = opts || {};
+    let dlg = document.getElementById('imgViewer');
+    if (!dlg){
+      dlg = document.createElement(typeof HTMLDialogElement === 'function' ? 'dialog' : 'div');
+      dlg.id = 'imgViewer';
+      dlg.innerHTML = '<div class="iv-top"><button class="iv-btn" data-act="close" aria-label="إغلاق">✕ إغلاق</button><span class="iv-count"></span><button class="iv-btn iv-orig" data-act="orig" style="display:none;">📄 الملف الأصلي</button></div>'
+        + '<div class="iv-stage"><img class="iv-img" alt=""><div class="iv-msg"></div></div>'
+        + '<div class="iv-nav"><button class="iv-btn" data-act="prev">‹ السابق</button><button class="iv-btn" data-act="next">التالي ›</button></div>';
+      document.body.appendChild(dlg);
+      dlg.addEventListener('click', function(e){
+        const b = e.target.closest('[data-act]');
+        const act = b && b.getAttribute('data-act');
+        if (act === 'close') closeViewer();
+        else if (act === 'prev') stepViewer(-1);
+        else if (act === 'next') stepViewer(1);
+        else if (act === 'orig'){ if (viewerState && viewerState.pdf) openPdfFile(viewerState.pdf); }
+        else if (e.target === dlg || e.target.classList.contains('iv-stage')) closeViewer();
+      });
+      let x0 = null;
+      dlg.addEventListener('touchstart', function(e){ x0 = (e.touches.length === 1) ? e.touches[0].clientX : null; }, { passive:true });
+      dlg.addEventListener('touchend', function(e){
+        if (x0 === null) return;
+        const dx = e.changedTouches[0].clientX - x0; x0 = null;
+        if (Math.abs(dx) > 60) stepViewer(dx < 0 ? 1 : -1);   // right-to-left page: swipe left = next
+      }, { passive:true });
+      dlg.addEventListener('cancel', function(e){ e.preventDefault(); closeViewer(); });
+      document.addEventListener('keydown', function(e){
+        if (!viewerState) return;
+        if (e.key === 'ArrowLeft') stepViewer(1);
+        else if (e.key === 'ArrowRight') stepViewer(-1);
+        else if (e.key === 'Escape') closeViewer();
+      });
+    }
+    viewerState = { refs: refs, i: Math.max(0, Math.min(start || 0, refs.length - 1)), pdf: opts.pdf || null };
+    dlg.querySelector('.iv-orig').style.display = viewerState.pdf ? '' : 'none';
+    if (dlg.showModal){ if (!dlg.open){ try{ dlg.showModal(); }catch(e){ dlg.setAttribute('open', ''); } } }
+    else dlg.classList.add('iv-open');
+    showViewerImage();
+  }
+  function showViewerImage(){
+    const dlg = document.getElementById('imgViewer');
+    if (!dlg || !viewerState) return;
+    const st = viewerState, img = dlg.querySelector('.iv-img'), msg = dlg.querySelector('.iv-msg'), n = st.refs.length;
+    dlg.querySelector('.iv-count').textContent = n > 1 ? (toArabicDigits(st.i + 1) + ' / ' + toArabicDigits(n)) : '';
+    dlg.querySelector('[data-act=prev]').style.visibility = st.i > 0 ? 'visible' : 'hidden';
+    dlg.querySelector('[data-act=next]').style.visibility = st.i < n - 1 ? 'visible' : 'hidden';
+    img.style.display = 'none';
+    msg.textContent = 'جارٍ التحميل…';
+    const want = st.i;
+    resolveImgSrc(st.refs[want]).then(function(src){
+      if (!viewerState || viewerState.i !== want) return;
+      img.onload = function(){ msg.textContent = ''; img.style.display = ''; };
+      img.onerror = function(){ msg.textContent = 'تعذّر عرض الصورة'; };
+      img.src = src;
+    }).catch(function(){ msg.textContent = 'تعذّر تحميل الصورة'; });
+  }
+  function stepViewer(d){
+    if (!viewerState) return;
+    const j = viewerState.i + d;
+    if (j < 0 || j >= viewerState.refs.length) return;
+    viewerState.i = j; showViewerImage();
+  }
+  function closeViewer(){
+    const dlg = document.getElementById('imgViewer');
+    viewerState = null;
+    if (!dlg) return;
+    if (dlg.close && dlg.open) dlg.close();
+    dlg.classList.remove('iv-open'); dlg.removeAttribute('open');
+    dlg.querySelector('.iv-img').removeAttribute('src');
+  }
+  // pictures inside an opened report open in the viewer too
+  document.addEventListener('click', function(e){
+    const img = e.target.closest && e.target.closest('#reportView .report-imgs img, #reportView .report-pdf img');
+    if (!img) return;
+    const box = img.closest('.report-imgs, .report-pdf');
+    const imgs = Array.from(box.querySelectorAll('img'));
+    openViewer(imgs.map(function(i){ return i.getAttribute('data-fsfile') ? 'fsfile:' + i.getAttribute('data-fsfile') : (i.currentSrc || i.src); }), imgs.indexOf(img));
+  });
+
+  // Phones often refuse to show a PDF in a new window opened after loading,
+  // so on touch devices the original file is handed over as a download
+  // (the phone then opens it in its PDF viewer); on computers it opens in a tab.
   function openPdfFile(ef){
-    try{
-      if (typeof ef.data === 'string' && ef.data.indexOf('/_blob/') === 0){ window.open(ef.data, '_blank'); return; }
-      if (typeof ef.data === 'string' && ef.data.indexOf('fsfile:') === 0){
-        const w = window.open('', '_blank');
-        getFileBytes(ef.data).then(function(b){ const u = URL.createObjectURL(new Blob([b], { type:'application/pdf' })); if (w) w.location.href = u; else window.open(u, '_blank'); }).catch(function(){ if (w) w.close(); toast('تعذّر فتح الملف'); });
-        return;
-      }
-      const url = URL.createObjectURL(new Blob([dataUriToBytes(ef.data)], { type: 'application/pdf' }));
-      window.open(url, '_blank');
-      setTimeout(function(){ URL.revokeObjectURL(url); }, 60000);
-    }catch(e){ toast('تعذّر فتح الملف'); }
+    if (typeof ef.data === 'string' && ef.data.indexOf('/_blob/') === 0){ window.open(ef.data, '_blank'); return; }
+    const touch = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+    toast('جارٍ تجهيز الملف…');
+    getFileBytes(ef.data).then(function(b){
+      const href = URL.createObjectURL(new Blob([b], { type: 'application/pdf' }));
+      const link = document.createElement('a');
+      link.href = href; link.target = '_blank'; link.rel = 'noopener';
+      if (touch) link.download = ef.name || 'ملف.pdf';
+      document.body.appendChild(link); link.click(); link.remove();
+      setTimeout(function(){ URL.revokeObjectURL(href); }, 60000);
+    }).catch(function(){ toast('تعذّر فتح الملف'); });
   }
 
   // ---------------- FULL REPORT ----------------
