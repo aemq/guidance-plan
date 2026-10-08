@@ -23,7 +23,8 @@
              {src: I512, sizes: "512x512", type: "image/png", purpose: "any"},
              {src: I512, sizes: "512x512", type: "image/png", purpose: "maskable"} ]
   };
-  add('manifest', URL.createObjectURL(new Blob([JSON.stringify(manifest)], {type: 'application/manifest+json'})));
+  if (window.__FORCE_STATIC_PWA || /\.github\.io$/.test(location.hostname)) add('manifest', 'manifest.webmanifest');
+  else add('manifest', URL.createObjectURL(new Blob([JSON.stringify(manifest)], {type: 'application/manifest+json'})));
 })();
 </script>
 <meta name="mobile-web-app-capable" content="yes">
@@ -1512,6 +1513,7 @@ window.addEventListener('appinstalled', function(){ window.__deferredInstall = n
     }
     function newId(){ let x = ''; for (let i = 0; i < 32; i++) x += '0123456789abcdef'[Math.floor(Math.random() * 16)]; return x; }
     return {
+      colPath: filesCol,
       upload: async function(blob){
         try{
           const id = newId();
@@ -1552,13 +1554,85 @@ window.addEventListener('appinstalled', function(){ window.__deferredInstall = n
       }
     };
   }
+  // Everything currently in this device's (anonymous) space, read before
+  // switching accounts so it can be carried over afterwards.
+  async function snapshotSpace(uid){
+    const fs = window.firebase.firestore();
+    const filesPath = (cloud.assets && cloud.assets.colPath) || ('users/' + uid + '/files');
+    const g = await fs.collection('users/' + uid + '/' + CLOUD_COL).get();
+    const docs = g.docs.map(function(d){ return { id: d.id, data: d.data() }; });
+    const fm = await fs.collection(filesPath).get();
+    const files = [];
+    for (const d of fm.docs){
+      const meta = d.data(); const chunks = [];
+      for (let k = 0; k < (meta.n || 1); k++){ const c = await fs.doc(filesPath + '/' + d.id + '/chunks/' + k).get(); chunks.push(c.exists ? c.data() : { d: '' }); }
+      files.push({ id: d.id, meta: meta, chunks: chunks });
+    }
+    return { docs: docs, files: files, filesSub: filesPath.split('/').pop() };
+  }
+  // Add that content to the Google account's space without overwriting what is already there.
+  async function mergeSpaceInto(snap, uid){
+    const fs = window.firebase.firestore();
+    const base = 'users/' + uid + '/';
+    for (const f of snap.files){
+      for (let k = 0; k < f.chunks.length; k++) await fs.doc(base + snap.filesSub + '/' + f.id + '/chunks/' + k).set(f.chunks[k]);
+      await fs.doc(base + snap.filesSub + '/' + f.id).set(f.meta);
+    }
+    for (const d of snap.docs){
+      const ref = fs.doc(base + CLOUD_COL + '/' + d.id);
+      const cur = await ref.get();
+      if (!cur.exists){ await ref.set(d.data); continue; }
+      if (d.id.indexOf('item_') !== 0) continue;           // settings and order: keep the account's
+      try{
+        const a = JSON.parse(cur.data().j), b = JSON.parse(d.data.j);
+        a.images = (a.images || []).concat((b.images || []).filter(function(v){ return (a.images || []).indexOf(v) < 0; }));
+        const have = new Set((a.evidenceFiles || []).map(function(e){ return e.data; }));
+        a.evidenceFiles = (a.evidenceFiles || []).concat((b.evidenceFiles || []).filter(function(e){ return !have.has(e.data); }));
+        ['notes','goal','audience','comment','requirements','preparedBy'].forEach(function(k){ if (!a[k] && b[k]) a[k] = b[k]; });
+        await ref.set({ j: JSON.stringify(a), t: Date.now() });
+      }catch(e){ console.warn('merge item failed', d.id, e); }
+    }
+  }
+  let pendingSnap = null;
+  async function finishGoogleSwitch(snap){
+    const auth = cloud.fbAuth;
+    if (snap && (snap.docs.length || snap.files.length) && auth.currentUser){
+      try{ await mergeSpaceInto(snap, auth.currentUser.uid); }catch(e){ console.warn('merge failed', e); }
+    }
+    toast('تم فتح بياناتك المحفوظة في حساب Google ✅');
+    setTimeout(function(){ location.reload(); }, 800);
+  }
+  function googleErrorToast(e){
+    const code = (e && e.code) || '';
+    if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') return;
+    if (code === 'auth/popup-blocked') return toast('المتصفح منع نافذة الدخول — اسمحي بالنوافذ المنبثقة لهذا الموقع ثم أعيدي المحاولة');
+    if (code === 'auth/unauthorized-domain') return toast('هذا الموقع غير مسموح به في إعدادات Firebase');
+    if (code === 'auth/operation-not-allowed') return toast('تسجيل الدخول بـ Google غير مفعّل في Firebase');
+    if (code === 'auth/network-request-failed') return toast('لا يوجد اتصال بالإنترنت — أعيدي المحاولة');
+    console.warn('google sign-in failed', e);
+    toast('تعذّر تسجيل الدخول بحساب Google' + (code ? ' (' + code + ')' : ''));
+  }
+  function offerContinueSignIn(){
+    const b = document.querySelector('#googleLinkBtn');
+    if (!b) return;
+    const nb = b.cloneNode(false);
+    nb.id = 'googleContinueBtn';
+    nb.textContent = '✅ متابعة: افتحي بياناتي من حساب Google';
+    b.replaceWith(nb);
+    nb.addEventListener('click', async function(){
+      try{ await cloud.fbAuth.signInWithPopup(new window.firebase.auth.GoogleAuthProvider()); }
+      catch(e){ googleErrorToast(e); return; }
+      await finishGoogleSwitch(pendingSnap);
+    });
+    toast('اضغطي «متابعة» لفتح بياناتك');
+  }
   async function linkGoogleAccount(){
     const fb = window.firebase, auth = cloud.fbAuth;
     if (!fb || !auth || !auth.currentUser) return;
     const provider = new fb.auth.GoogleAuthProvider();
     try{
       if (auth.currentUser.isAnonymous){
-        await auth.currentUser.linkWithPopup(provider);
+        await auth.currentUser.linkWithPopup(provider);      // first device: this space becomes the account's
         toast('تم ربط بياناتك بحساب Google ✅');
       } else {
         await auth.signInWithPopup(provider);
@@ -1566,20 +1640,22 @@ window.addEventListener('appinstalled', function(){ window.__deferredInstall = n
       setTimeout(function(){ location.reload(); }, 700);
     }catch(e){
       const code = e && e.code;
-      if (code === 'auth/credential-already-in-use' || code === 'auth/email-already-in-use'){
-        // this Google account already holds a space (e.g. linked on another computer): open it
+      if (code === 'auth/credential-already-in-use' || code === 'auth/email-already-in-use' || code === 'auth/account-exists-with-different-credential'){
+        // another device already linked this account: open its data here,
+        // carrying over anything done on this device before signing in
+        toast('هذا الحساب فيه بيانات محفوظة — جارٍ فتحها…');
+        let snap = null;
+        try{ snap = await snapshotSpace(auth.currentUser.uid); }catch(e2){ console.warn('snapshot failed', e2); }
         const cred = e.credential || (fb.auth.GoogleAuthProvider.credentialFromError ? fb.auth.GoogleAuthProvider.credentialFromError(e) : null);
         if (cred){
-          try{ await auth.signInWithCredential(cred); toast('تم فتح بياناتك المحفوظة في حساب Google ✅'); setTimeout(function(){ location.reload(); }, 700); return; }
-          catch(e2){ console.warn(e2); }
+          try{ await auth.signInWithCredential(cred); await finishGoogleSwitch(snap); return; }
+          catch(e3){ console.warn('credential sign-in failed', e3); }
         }
+        pendingSnap = snap;
+        offerContinueSignIn();
+        return;
       }
-      if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') return;
-      if (code === 'auth/popup-blocked') { toast('المتصفح منع نافذة الدخول — اسمحي بالنوافذ المنبثقة لهذا الموقع'); return; }
-      if (code === 'auth/unauthorized-domain') { toast('هذا الموقع غير مسموح به في إعدادات Firebase بعد'); return; }
-      if (code === 'auth/operation-not-allowed') { toast('تسجيل الدخول بـ Google غير مفعّل في Firebase بعد'); return; }
-      console.warn('google link failed', e);
-      toast('تعذّر الربط بحساب Google');
+      googleErrorToast(e);
     }
   }
   async function signOutGoogle(){
@@ -1904,7 +1980,7 @@ window.addEventListener('appinstalled', function(){ window.__deferredInstall = n
           ? (googleLinked
               ? '<div style="text-align:right;">☁️ <b>قاعدة بيانات Firebase مفعّلة</b> — بياناتك وصورك محفوظة في حساب Google: <b>' + escapeHtml(fbUser.email || '') + '</b>، وتفتحينها من أي جهاز بعد تسجيل الدخول بنفس الحساب.</div><button class="btn btn-outline btn-block btn-sm" id="googleOutBtn" style="margin-top:6px;">تسجيل الخروج من هذا الجهاز</button>'
               : '<div style="text-align:right;">☁️ <b>قاعدة بيانات Firebase مفعّلة</b> — بياناتك وصورك محفوظة في حسابك الخاص على هذا المتصفح، ولا يراها غيرك.<br><span style="color:var(--muted);">تنبيه: إن مسحتِ بيانات هذا المتصفح يتعذّر الوصول إليها لاحقًا، فاحفظي نسخة احتياطية JSON من حين لآخر.</span></div>'
-                + (fbUser ? '<div style="margin-top:8px;padding:8px 10px;border:1px dashed var(--line);border-radius:10px;text-align:right;">🔗 بياناتك الآن على هذا المتصفح فقط. اربطيها بحساب Google لتفتحيها من أي كمبيوتر آخر بنفس الحساب.<button class="btn btn-teal btn-block" id="googleLinkBtn" style="margin-top:6px;">ربط بحساب Google</button></div>' : ''))
+                + (fbUser ? '<div style="margin-top:8px;padding:8px 10px;border:1px dashed var(--line);border-radius:10px;text-align:right;">🔗 بياناتك الآن على هذا المتصفح فقط. سجّلي الدخول بحساب Google: على أول جهاز تُربط بياناتك بالحساب، وعلى أي جهاز آخر تظهر بياناتك المحفوظة فيه.<button class="btn btn-teal btn-block" id="googleLinkBtn" style="margin-top:6px;">تسجيل الدخول بحساب Google</button></div>' : ''))
           : '<div style="text-align:right;">☁️ <b>قاعدة البيانات المدمجة مفعّلة</b> — الصور تُحفظ في تخزين مستقل بمساحة أكبر، ويراها كل من لديه صلاحية.</div>';
         if (cloud.assets){
           try{
@@ -2101,32 +2177,43 @@ window.addEventListener('appinstalled', function(){ window.__deferredInstall = n
     // install card — hidden once the app is already running installed
     const isInstalled = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone;
     if (!isInstalled){
+      const ua = navigator.userAgent || '';
+      const isIOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      const inApp = /FBAN|FBAV|Instagram|Line\/|Snapchat|WhatsApp|; wv\)/i.test(ua);
+      const onFile = location.protocol === 'file:';
       const ic = document.createElement('div');
       ic.className = 'card';
-      const onFile = location.protocol === 'file:';
-      ic.innerHTML = `<h2>📲 تثبيت التطبيق على سطح المكتب / الشاشة الرئيسية</h2>
-        <div class="empty-hint" style="text-align:right;margin-bottom:8px;">يُثبَّت كتطبيق مستقل بأيقونته ويفتح بنقرة واحدة من سطح المكتب.</div>
-        ${onFile ? '<div class="empty-hint" style="color:var(--danger);text-align:right;margin-bottom:8px;">⚠️ أنتِ تفتحين الملف من الجهاز مباشرة، والتثبيت لا يتوفر إلا من الرابط المنشور (يبدأ بـ https).</div>' : ''}
+      ic.innerHTML = `<h2>📲 تثبيت التطبيق على الجهاز</h2>
+        <div class="empty-hint" style="text-align:right;margin-bottom:8px;">يظهر بأيقونته على الشاشة الرئيسية أو سطح المكتب ويفتح بنقرة واحدة.</div>
         <button class="btn btn-teal btn-block" id="installBtn">📲 تثبيت الآن</button>
-        <details style="margin-top:8px;">
-          <summary style="font-size:12px;color:var(--teal-700);font-weight:bold;cursor:pointer;">لم يظهر خيار التثبيت؟ اتبعي الخطوات</summary>
-          <div style="font-size:11.5px;line-height:1.9;color:var(--muted);margin-top:6px;">
-            <b>كمبيوتر (Chrome):</b> القائمة ⋮ ← «حفظ ومشاركة» ← «تثبيت الصفحة كتطبيق»، أو «إنشاء اختصار…» مع تفعيل «فتح كنافذة».<br>
-            <b>كمبيوتر (Edge):</b> القائمة ⋯ ← «التطبيقات» ← «تثبيت هذا الموقع كتطبيق».<br>
-            <b>أندرويد (Chrome):</b> القائمة ⋮ ← «تثبيت التطبيق» أو «إضافة إلى الشاشة الرئيسية».<br>
-            <b>آيفون (Safari):</b> زر المشاركة ← «إضافة إلى الشاشة الرئيسية».
-          </div>
-        </details>`;
+        <div id="installHelp" style="display:none;margin-top:10px;font-size:12.5px;line-height:1.9;text-align:right;"></div>`;
       wrap.appendChild(ic);
-      ic.querySelector('#installBtn').addEventListener('click', async ()=>{
+      const help = ic.querySelector('#installHelp');
+      const btn = ic.querySelector('#installBtn');
+      function showHelp(html){ help.innerHTML = html; help.style.display = 'block'; }
+      const ready = function(){ btn.textContent = '📲 تثبيت الآن (بنقرة واحدة)'; };
+      if (window.__deferredInstall) ready();
+      window.addEventListener('pwa-install-ready', ready);
+      window.addEventListener('appinstalled', function(){ toast('تم تثبيت التطبيق ✅'); ic.remove(); });
+      btn.addEventListener('click', async ()=>{
         const ev = window.__deferredInstall;
         if (ev){
           ev.prompt();
           try{ await ev.userChoice; }catch(e){}
           window.__deferredInstall = null;
+          return;
+        }
+        if (onFile){
+          showHelp('⚠️ التثبيت يعمل من الرابط المنشور فقط، وليس من ملف على الجهاز.');
+        } else if (inApp){
+          showHelp('⚠️ الرابط مفتوح داخل تطبيق (مثل واتساب)، وهنا لا يمكن التثبيت.<br>اضغطي ⋮ أو «…» أعلى الشاشة واختاري <b>«فتح في Chrome»</b> أو <b>«فتح في Safari»</b>، ثم اضغطي «تثبيت الآن» من هناك.'
+            + '<br><button class="btn btn-outline btn-sm" id="copyAppLink" style="margin-top:6px;">📋 نسخ الرابط</button>');
+          const cp = help.querySelector('#copyAppLink');
+          cp.addEventListener('click', async ()=>{ try{ await navigator.clipboard.writeText(location.href.split('#')[0]); toast('تم نسخ الرابط'); }catch(e){} });
+        } else if (isIOS){
+          showHelp('آيفون لا يسمح بالتثبيت بزر واحد، والطريقة ثلاث لمسات في <b>Safari</b>:<br>١. اضغطي زر المشاركة <b>⬆️</b> أسفل الشاشة.<br>٢. اختاري <b>«إضافة إلى الشاشة الرئيسية»</b>.<br>٣. اضغطي <b>«إضافة»</b>.');
         } else {
-          ic.querySelector('details').open = true;
-          toast('اتبعي الخطوات أدناه للتثبيت من قائمة المتصفح');
+          showHelp('المتصفح لم يجهّز التثبيت السريع بعد (يحدث في أول زيارة). جرّبي:<br>• <b>Chrome على الكمبيوتر:</b> أيقونة التثبيت ⊕ في شريط العنوان، أو القائمة ⋮ ← «حفظ ومشاركة» ← «تثبيت الصفحة كتطبيق».<br>• <b>Chrome على أندرويد:</b> القائمة ⋮ ← «تثبيت التطبيق» أو «إضافة إلى الشاشة الرئيسية».<br>• <b>Edge:</b> القائمة … ← «التطبيقات» ← «تثبيت هذا الموقع كتطبيق».');
         }
       });
     }
@@ -3759,6 +3846,11 @@ window.addEventListener('appinstalled', function(){ window.__deferredInstall = n
     init();
   }
 })();
+</script>
+<script>
+if ('serviceWorker' in navigator && (window.__FORCE_STATIC_PWA || /\.github\.io$/.test(location.hostname))) {
+  window.addEventListener('load', function(){ navigator.serviceWorker.register('sw.js').catch(function(){}); });
+}
 </script>
 </body>
 </html>
