@@ -1554,6 +1554,41 @@ window.addEventListener('appinstalled', function(){ window.__deferredInstall = n
       }
     };
   }
+  // The trial copy (trial.html) keeps its data apart, in guidance_trial / files_trial.
+  const TRIAL_COL = 'guidance_trial', TRIAL_FILES = 'files_trial';
+  function stripTrialDoc(data){
+    try{ const b = JSON.parse(data.j); delete b.signature; return { j: JSON.stringify(b), t: Date.now() }; }
+    catch(e){ return data; }
+  }
+  async function readTrialSpace(fs, uid){
+    const base = 'users/' + uid + '/';
+    const g = await fs.collection(base + TRIAL_COL).get();
+    const docs = g.docs.filter(function(d){ return d.id.indexOf('item_') === 0; }).map(function(d){ return { id: d.id, data: stripTrialDoc(d.data()) }; });
+    const fm = await fs.collection(base + TRIAL_FILES).get();
+    const files = [];
+    for (const d of fm.docs){
+      const meta = d.data(); const chunks = [];
+      for (let k = 0; k < (meta.n || 1); k++){ const c = await fs.doc(base + TRIAL_FILES + '/' + d.id + '/chunks/' + k).get(); chunks.push(c.exists ? c.data() : { d: '' }); }
+      files.push({ id: d.id, meta: meta, chunks: chunks });
+    }
+    return { docs: docs, files: files };
+  }
+  async function moveTrialIntoMain(btn){
+    const fs = window.firebase.firestore();
+    const uid = cloud.fbAuth.currentUser.uid;
+    if (btn){ btn.disabled = true; btn.textContent = 'جارٍ النقل…'; }
+    try{
+      const t = await readTrialSpace(fs, uid);
+      await mergeSpaceInto({ docs: t.docs, files: t.files, filesSub: 'files' }, uid);
+      toast('تم نقل أعمالك من النسخة التجريبية ✅');
+      setTimeout(function(){ location.reload(); }, 800);
+    }catch(e){
+      console.warn('trial move failed', e);
+      toast('تعذّر النقل' + (e && e.code ? ' (' + e.code + ')' : ''));
+      if (btn){ btn.disabled = false; btn.textContent = '📥 أعيدي المحاولة'; }
+    }
+  }
+
   // Everything currently in this device's (anonymous) space, read before
   // switching accounts so it can be carried over afterwards.
   async function snapshotSpace(uid){
@@ -1567,6 +1602,10 @@ window.addEventListener('appinstalled', function(){ window.__deferredInstall = n
       const meta = d.data(); const chunks = [];
       for (let k = 0; k < (meta.n || 1); k++){ const c = await fs.doc(filesPath + '/' + d.id + '/chunks/' + k).get(); chunks.push(c.exists ? c.data() : { d: '' }); }
       files.push({ id: d.id, meta: meta, chunks: chunks });
+    }
+    if (CLOUD_COL === 'guidance'){
+      try{ const t = await readTrialSpace(fs, uid); t.docs.forEach(function(d){ docs.push(d); }); t.files.forEach(function(f){ files.push(f); }); }
+      catch(e){ console.warn('trial snapshot failed', e); }
     }
     return { docs: docs, files: files, filesSub: filesPath.split('/').pop() };
   }
@@ -1898,6 +1937,7 @@ window.addEventListener('appinstalled', function(){ window.__deferredInstall = n
         CACHE[id] = copy; keys.add('item:' + id);
       }
     });
+    Object.keys(CACHE).forEach(function(id){ if (/^custom-/.test(id) && state.order.indexOf(id) < 0) state.order.push(id); });
     return keys;
   }
 
@@ -1998,6 +2038,16 @@ window.addEventListener('appinstalled', function(){ window.__deferredInstall = n
         const go = body.querySelector('#googleOutBtn'); if (go) go.addEventListener('click', signOutGoogle);
         const mb = body.querySelector('#migrateBtn');
         if (mb) mb.addEventListener('click', function(){ migrateLocalToCloud(card); });
+        if (cloud.kind === 'firebase' && CLOUD_COL === 'guidance' && cloud.fbAuth && cloud.fbAuth.currentUser){
+          window.firebase.firestore().collection('users/' + cloud.fbAuth.currentUser.uid + '/' + TRIAL_COL).get().then(function(sn){
+            if (sn.empty || !sn.docs.some(function(d){ return d.id.indexOf('item_') === 0; })) return;
+            const box = document.createElement('div');
+            box.style.cssText = 'margin-top:8px;padding:8px 10px;border:1px dashed var(--teal-700);border-radius:10px;text-align:right;';
+            box.innerHTML = '🧪 لديك أعمال محفوظة في <b>النسخة التجريبية</b> على هذا الجهاز.<button class="btn btn-teal btn-block" id="trialMoveBtn" style="margin-top:6px;">📥 نقل أعمالي من النسخة التجريبية إلى هذه النسخة</button>';
+            body.appendChild(box);
+            box.querySelector('#trialMoveBtn').addEventListener('click', function(){ moveTrialIntoMain(this); });
+          }).catch(function(){});
+        }
       } else {
         let chars = 0;
         try{ for (let i = 0; i < localStorage.length; i++){ const k = localStorage.key(i); if (k && k.indexOf(LS_PREFIX) === 0) chars += (localStorage.getItem(k) || '').length + k.length; } }catch(e){}
