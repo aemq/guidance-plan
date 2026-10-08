@@ -1,0 +1,33 @@
+{
+  "name": "خطة التوجيه الطلابي — نسخة تجريبية",
+  "short_name": "التوجيه (تجريبي)",
+  "id": "./trial.html",
+  "start_url": "./trial.html",
+  "description": "خطة برامج وخدمات التوجيه الطلابي — الأسابيع والبرامج والتواقيع والتقارير",
+  "lang": "ar",
+  "dir": "rtl",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f6f9f9",
+  "theme_color": "#0e7c86",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
